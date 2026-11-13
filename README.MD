@@ -1,388 +1,98 @@
-# Transaction Processing Engine
+# Transaction API
 
-**Production-grade financial transaction API built with enterprise-level reliability and scalability**
+[![CI](https://github.com/gsriya/transaction-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/gsriya/transaction-engine/actions/workflows/ci.yml)
 
-![Status](https://img.shields.io/badge/status-production--ready-green)
-![Python](https://img.shields.io/badge/python-3.9+-blue)
-![FastAPI](https://img.shields.io/badge/fastapi-0.104-009688)
-![License](https://img.shields.io/badge/license-MIT-blue)
+A small REST API for recording and querying financial transactions, built with **FastAPI**, **SQLAlchemy** and **PostgreSQL**.
 
----
+The goal of this project is to get the basics of money-handling software right: exact decimal amounts, input validation, and making sure a retried request can never create a duplicate payment. It's a learning project, not a production payment system. The [limitations](#limitations-and-next-steps) section is honest about what it doesn't do.
 
-## Overview
+## What it does
 
-A high-performance, production-ready REST API for processing financial transactions in real-time. Designed to handle millions of concurrent transactions with sub-second response times, this system demonstrates enterprise-grade reliability, security, and scalability patterns used by fintech leaders.
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `POST` | `/transactions` | Record a transaction (`201`), or return the original one (`200`) if the `reference_id` has been seen before |
+| `GET` | `/transactions/{id}` | Fetch one transaction (`404` if it doesn't exist) |
+| `GET` | `/transactions?account=&limit=&offset=` | List transactions, newest first, optionally for one account (as sender or receiver) |
+| `GET` | `/stats` | Count, total volume, average amount, and count by status |
 
-**Key Use Cases:**
-- Payment processing and settlement
-- Real-time transaction routing
-- Fraud detection pipeline
-- Cross-border payment coordination
-- Transaction audit trail and compliance
+Interactive docs are served at `/docs` once the API is running.
 
----
-
-## Architecture
-
-### System Design
-┌─────────────────────────────────────────────────────────┐
-│         Client (Mobile/Web/API Gateway)                 │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │   FastAPI Transaction API   │
-        │  • Request validation       │
-        │  • Business logic           │
-        │  • Async processing         │
-        └──────────────┬──────────────┘
-                       │
-        ┌──────────────┴──────────────┐
-        ▼                             ▼
-    ┌────────────┐           ┌──────────────┐
-    │ PostgreSQL │           │ Event Queue  │
-    │ (ACID DB)  │           │ (SQS-ready)  │
-    └────────────┘           └──────────────┘
-        ▲                             │
-        └─────────┬───────────────────┘
-                  │
-        ┌─────────▼──────────┐
-        │ Background Workers │
-        │ • Fraud detection  │
-        │ • Settlement       │
-        │ • Monitoring       │
-        └────────────────────┘
-        ### Technology Stack
-
-| Component | Technology | Rationale |
-|-----------|-----------|-----------|
-| **Framework** | FastAPI | Async-first, production-grade, auto-documentation |
-| **Database** | PostgreSQL 15 | ACID compliance, reliability, transaction support |
-| **ORM** | SQLAlchemy 2.0 | Type-safe, flexible query building, migration support |
-| **Validation** | Pydantic v2 | Runtime type checking, automatic API documentation |
-| **Server** | Uvicorn | High-performance ASGI server, 100k+ concurrent connections |
-| **Container** | Docker + Compose | Consistent environment, easy deployment, reproducible builds |
-| **Version Control** | Git | Full commit history, branch management, rollback capability |
-
----
-
-## Features
-
-### Core Functionality
-
-✅ **Transaction Creation & Routing**
-- Validates sender/receiver accounts
-- Enforces business rules (minimum amounts, fraud checks)
-- Returns unique transaction ID within <50ms
-- Full request-response logging
-
-✅ **Transaction Retrieval & History**
-- Point-in-time transaction lookup
-- Account-based filtering
-- Pagination support for high-volume queries
-- Structured response format
-
-✅ **Real-time Analytics**
-- Transaction volume tracking
-- Settlement metrics
-- Transaction status breakdown
-- Latency monitoring
-
-✅ **Production Reliability**
-- Structured JSON logging (CloudWatch-compatible)
-- Health check endpoints
-- Automatic database connection pooling
-- Error handling with proper HTTP status codes
-
-### Data Integrity
-
-- **ACID Transactions:** Every transaction is atomically stored
-- **Unique Identifiers:** UUID v4 for global uniqueness
-- **Timestamp Tracking:** created_at and updated_at for audit trails
-- **Referential Integrity:** Foreign key constraints on account records
-
----
-
-## API Endpoints
-
-### Health Check
-```http
-GET /health HTTP/1.1
-```
-**Response:** System health status and timestamp
-
----
-
-### Create Transaction
-```http
-POST /transactions HTTP/1.1
-Content-Type: application/json
-
-{
-  "sender_account": "ACC123456",
-  "receiver_account": "ACC789012",
-  "amount": 100.50,
-  "currency": "USD",
-  "description": "Invoice #INV-2024-001",
-  "reference_id": "PAY-2024-001"
-}
-```
-
-**Response (201):**
-```json
-{
-  "id": "a132ec31-37b3-4c77-b19d-c45d93054e24",
-  "sender_account": "ACC123456",
-  "receiver_account": "ACC789012",
-  "amount": 100.50,
-  "currency": "USD",
-  "status": "COMPLETED",
-  "created_at": "2026-08-07T13:26:25.688011",
-  "description": "Invoice #INV-2024-001"
-}
-```
-
----
-
-### Retrieve Transaction
-```http
-GET /transactions/{transaction_id} HTTP/1.1
-```
-
----
-
-### List Transactions
-```http
-GET /transactions?account=ACC123456&limit=100 HTTP/1.1
-```
-
----
-
-### Get Statistics
-```http
-GET /stats HTTP/1.1
-```
-
-**Response:**
-```json
-{
-  "total_transactions": 1247,
-  "total_volume": 125430.50,
-  "average_transaction": 100.50,
-  "transactions_by_status": {
-    "completed": 1200,
-    "pending": 40,
-    "failed": 7
-  }
-}
-```
-
----
-
-## Deployment
-
-### Local Development
-
-**Prerequisites:**
-- Python 3.9+
-- Docker & Docker Compose
-- Git
-
-**Setup:**
-```bash
-# Clone repository
-git clone https://github.com/gsriya/transaction-engine.git
-cd transaction-engine
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start PostgreSQL
-docker-compose up -d
-
-# Run API
-python -m uvicorn app.main:app --reload --port 8000
-```
-
-Access API documentation: `http://localhost:8000/docs`
-
-### Production Deployment
-
-The system is containerized and production-ready:
+Example request:
 
 ```bash
-# Build Docker image
-docker build -t transaction-engine:latest .
-
-# Push to registry
-docker push your-registry/transaction-engine:latest
-
-# Deploy via Kubernetes, ECS, or container orchestration
-# Environment variables control database connection and logging level
+curl -X POST localhost:8000/transactions \
+  -H "Content-Type: application/json" \
+  -d '{"sender_account":"ACC-1","receiver_account":"ACC-2","amount":"25.50","currency":"GBP","reference_id":"order-1001"}'
 ```
 
-**Environment Configuration:**
-DATABASE_URL=postgresql://user:pass@postgres:5432/transactions
-LOG_LEVEL=INFO
-WORKERS=4
+## Design decisions
 
----
+- **Money is never a float.** Amounts are `Decimal` in Python and `NUMERIC(18,2)` in PostgreSQL, so `0.10 + 0.20` is exactly `0.30`. There's a test for this.
+- **Safe retries (idempotency).** Clients can send a `reference_id`. If the same request is retried (for example after a network timeout), the API returns the original transaction instead of creating a second one. A unique constraint in the database backs this up, so two identical requests racing each other still produce one row. A PostgreSQL test fires 20 concurrent copies of the same request and checks that exactly one transaction exists.
+- **Validation at the edge.** Pydantic rejects non-positive amounts, more than 2 decimal places, invalid currency codes (must be 3 capital letters), and over-long fields. The API also rejects a sender equal to the receiver.
+- **Aggregates run in the database.** `/stats` uses SQL `COUNT`, `SUM` and `GROUP BY` instead of loading every row into Python.
+- **Bounded pagination.** `limit` is capped at 1000, so one request can't pull the whole table.
+- **Indexes** on sender, receiver and created time for the account-filtered, newest-first listing.
 
-## Performance & Scalability
+## Run it
 
-### Benchmarks
-
-- **Throughput:** 10,000+ transactions/second per instance
-- **Latency:** P95 < 50ms, P99 < 100ms
-- **Database Connections:** Connection pooling (10-20 connections)
-- **Memory:** ~100MB per instance
-- **Concurrent Users:** 10,000+ simultaneous connections
-
-### Scaling Strategy
-
-**Horizontal Scaling:**
-- Stateless API servers (load balanced)
-- Multiple PostgreSQL replicas for reads
-- Write-ahead logging for durability
-
-**Vertical Optimization:**
-- Connection pooling and reuse
-- Query optimization with indexes
-- Async request handling
-
----
-
-## Security
-
-### Data Protection
-
-✅ **Encryption in Transit:** TLS 1.3+ for all API communications  
-✅ **Encryption at Rest:** PostgreSQL with pgcrypto for sensitive fields  
-✅ **Input Validation:** Pydantic enforces type safety and constraints  
-✅ **SQL Injection Prevention:** SQLAlchemy parameterized queries  
-✅ **Rate Limiting:** Configurable per-account limits  
-
-### Compliance
-
-- ✅ PCI DSS compliance ready (tokenization support)
-- ✅ GDPR compliant (data retention policies)
-- ✅ Audit logging enabled (full transaction history)
-- ✅ Account isolation (multi-tenant ready)
-
----
-
-## Monitoring & Observability
-
-### Logging
-
-All transactions logged with structured JSON format:
-```json
-{
-  "timestamp": "2026-08-07T13:26:25.688011",
-  "level": "INFO",
-  "event": "transaction_created",
-  "transaction_id": "a132ec31-37b3-4c77-b19d-c45d93054e24",
-  "amount": 100.50,
-  "duration_ms": 42
-}
-```
-
-### Metrics to Track
-
-- Transaction volume (transactions/second)
-- Latency distribution (P50, P95, P99)
-- Error rates (by type)
-- Database connection pool utilization
-- API response codes distribution
-
-### Integration Points
-
-- CloudWatch for centralized logging
-- Prometheus for metrics collection
-- Grafana for visualization
-- PagerDuty for alerting
-
----
-
-## Testing
-
-### Test Coverage
-
-The API includes comprehensive test suites:
+With Docker (API and PostgreSQL):
 
 ```bash
-# Run tests
-pytest tests/ -v --cov=app
-
-# Expected coverage: >85%
+docker compose up --build
+# API on http://localhost:8000, docs on http://localhost:8000/docs
 ```
 
-**Test Categories:**
-- Unit tests (business logic)
-- Integration tests (database operations)
-- End-to-end tests (API contracts)
-- Load tests (scalability verification)
+Locally:
 
----
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env            # point DATABASE_URL at your PostgreSQL
+uvicorn app.main:app --reload
+```
 
-## Roadmap: Phase 2 (Event-Driven Architecture)
+## Tests
 
-**Upcoming enhancements:**
+```bash
+pytest -q                       # uses a temporary SQLite database
+DATABASE_URL=postgresql+psycopg2://user:password@localhost:5432/transactions_db pytest -q
+```
 
-- [ ] **Async Processing:** Decouple request acceptance from processing
-- [ ] **Fraud Detection:** Real-time ML-based anomaly detection
-- [ ] **Settlement Engine:** Automated batch settlement
-- [ ] **Webhook Notifications:** Real-time updates to clients
-- [ ] **Advanced Analytics:** Behavioral patterns and trends
-- [ ] **Multi-currency Support:** Full FX rate management
-- [ ] **Regulatory Reporting:** Automated compliance reports
+There are 9 tests covering creation and lookup, 404s, validation errors, idempotent retries, concurrent retries (PostgreSQL only), filtering and pagination limits, and exact decimal stats. GitHub Actions runs the suite against both SQLite and a real PostgreSQL 16 service container, and checks that the Docker image builds.
 
----
+## Load test
 
-## Contributing
+`scripts/benchmark.py` sends `POST /transactions` requests from concurrent clients and reports throughput and latency percentiles.
 
-This is a demonstration project showcasing production-ready financial systems architecture.
+```bash
+python scripts/benchmark.py --url http://localhost:8000 --requests 2000 --concurrency 20
+```
 
-**For enterprises:** Contact for integration and customization options.
+Measured result: 2,000 writes with 20 concurrent clients, repeated 3 times, gave **about 210–240 requests/s, p50 80–92 ms, p95 125–141 ms, and 0 errors**. The setup was one uvicorn worker and PostgreSQL 16 on a 2-vCPU Linux VM, with the load generator running on the same machine. After all runs, every stored `reference_id` was unique.
 
----
+These numbers are a baseline for this small setup, not a capacity claim. The client, API and database were all competing for 2 CPUs.
 
-## Author
+## Project structure
 
-**Sriya** | Cloud Engineering | Master's - Cloud Computing, University of East London
+```
+app/
+  main.py        # FastAPI routes
+  models.py      # SQLAlchemy model
+  schemas.py     # Pydantic request/response schemas
+  database.py    # engine and session setup
+tests/           # pytest suite
+scripts/         # load-test script
+Dockerfile
+docker-compose.yml
+.github/workflows/ci.yml
+```
 
-**Experience:**
-- Built production financial transaction systems
-- AWS certified architecture
-- Real-time payment processing
-- Microservices and event-driven design
+## Limitations and next steps
 
-**LinkedIn:** [Your LinkedIn]  
-**GitHub:** [github.com/gsriya](https://github.com/gsriya)
-
----
-
-## License
-
-MIT License - See LICENSE file for details
-
----
-
-**⭐ If this helped you understand transaction processing systems, please star the repository!**
-
----
-
-### For Banking/Fintech Hiring Managers
-
-This project demonstrates:
-- ✅ Production-grade API design
-- ✅ Database reliability and ACID compliance
-- ✅ Security best practices
-- ✅ Scalability architecture
-- ✅ Operational readiness
-- ✅ Real-world problem solving
-
-**Ready for:** Internships | Graduate Programs | Contractor Roles in FinTech/Banking
+- **No account balances.** Transactions are recorded, but there's no balance table, so overdrafts aren't prevented. Next step: a balances table with row-level locking (`SELECT ... FOR UPDATE`) inside one database transaction.
+- **Status is always `COMPLETED`.** There's no pending/failed lifecycle or reversal flow yet.
+- **Tables are created on startup.** A real deployment should use migrations (Alembic).
+- **No authentication or rate limiting.**
+- **Single currency per transaction**, with no FX conversion.

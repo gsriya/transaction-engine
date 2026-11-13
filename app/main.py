@@ -1,121 +1,102 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from app.database import engine, get_db, Base
-from app.models import Transaction
-from app.schemas import TransactionCreate, TransactionResponse
 import logging
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Optional
 
-Base.metadata.create_all(bind=engine)
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.database import Base, engine, get_db
+from app.models import Transaction
+from app.schemas import Stats, TransactionCreate, TransactionResponse
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("transaction_api")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
 
 app = FastAPI(
-    title="Transaction Processing Engine",
-    description="Production-grade API for processing financial transactions",
-    version="1.0.0"
+    title="Transaction API",
+    description="A small REST API for recording and querying financial transactions on PostgreSQL.",
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
 
 @app.post("/transactions", response_model=TransactionResponse, status_code=status.HTTP_201_CREATED)
-def create_transaction(
-    transaction: TransactionCreate,
-    db: Session = Depends(get_db)
-):
+def create_transaction(transaction: TransactionCreate, response: Response, db: Session = Depends(get_db)):
     if transaction.sender_account == transaction.receiver_account:
-        logger.warning(f"Invalid transaction: sender same as receiver")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Sender and receiver must be different"
-        )
-    
-    db_transaction = Transaction(
-        sender_account=transaction.sender_account,
-        receiver_account=transaction.receiver_account,
-        amount=transaction.amount,
-        currency=transaction.currency,
-        description=transaction.description,
-        reference_id=transaction.reference_id,
-        status="COMPLETED"
-    )
-    
+        logger.warning("rejected transaction: sender equals receiver")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sender and receiver must be different")
+
+    # Idempotency: a retried request with the same reference_id must not create a second transaction.
+    if transaction.reference_id:
+        existing = db.query(Transaction).filter(Transaction.reference_id == transaction.reference_id).first()
+        if existing:
+            response.status_code = status.HTTP_200_OK
+            return existing
+
+    db_transaction = Transaction(**transaction.model_dump(), status="COMPLETED")
     db.add(db_transaction)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two identical requests raced past the check above; the unique constraint keeps only one.
+        db.rollback()
+        existing = db.query(Transaction).filter(Transaction.reference_id == transaction.reference_id).first()
+        if existing is None:
+            raise
+        response.status_code = status.HTTP_200_OK
+        return existing
     db.refresh(db_transaction)
-    
-    logger.info(f"Transaction created: {db_transaction.id} for ${transaction.amount}")
-    
+    logger.info("transaction created id=%s amount=%s %s", db_transaction.id, transaction.amount, transaction.currency)
     return db_transaction
 
+
 @app.get("/transactions/{transaction_id}", response_model=TransactionResponse)
-def get_transaction(
-    transaction_id: str,
-    db: Session = Depends(get_db)
-):
-    db_transaction = db.query(Transaction).filter(
-        Transaction.id == transaction_id
-    ).first()
-    
+def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
+    db_transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not db_transaction:
-        logger.warning(f"Transaction not found: {transaction_id}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Transaction {transaction_id} not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Transaction {transaction_id} not found")
     return db_transaction
+
 
 @app.get("/transactions", response_model=list[TransactionResponse])
 def list_transactions(
-    account: str = None,
-    limit: int = 100,
-    db: Session = Depends(get_db)
+    account: Optional[str] = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
 ):
     query = db.query(Transaction)
-    
     if account:
-        query = query.filter(
-            (Transaction.sender_account == account) |
-            (Transaction.receiver_account == account)
-        )
-    
-    transactions = query.limit(limit).all()
-    
-    logger.info(f"Retrieved {len(transactions)} transactions")
-    
-    return transactions
+        query = query.filter(or_(Transaction.sender_account == account, Transaction.receiver_account == account))
+    return query.order_by(Transaction.created_at.desc(), Transaction.id).offset(offset).limit(limit).all()
 
-@app.get("/stats")
+
+@app.get("/stats", response_model=Stats)
 def get_stats(db: Session = Depends(get_db)):
-    transactions = db.query(Transaction).all()
-    
-    if not transactions:
-        return {
-            "total_transactions": 0,
-            "total_volume": 0,
-            "average_transaction": 0
-        }
-    
-    total_volume = sum(t.amount for t in transactions)
-    
-    return {
-        "total_transactions": len(transactions),
-        "total_volume": total_volume,
-        "average_transaction": total_volume / len(transactions),
-        "transactions_by_status": {
-            "completed": len([t for t in transactions if t.status == "COMPLETED"]),
-            "pending": len([t for t in transactions if t.status == "PENDING"]),
-            "failed": len([t for t in transactions if t.status == "FAILED"])
-        }
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Aggregates run inside the database instead of loading every row into memory.
+    count, total = db.query(func.count(Transaction.id), func.coalesce(func.sum(Transaction.amount), 0)).one()
+    by_status = dict(db.query(Transaction.status, func.count(Transaction.id)).group_by(Transaction.status).all())
+    total = Decimal(total).quantize(Decimal("0.01"))
+    average = (total / count).quantize(Decimal("0.01")) if count else Decimal("0.00")
+    return Stats(
+        total_transactions=count,
+        total_volume=total,
+        average_transaction=average,
+        transactions_by_status={s.lower(): n for s, n in by_status.items()},
+    )
